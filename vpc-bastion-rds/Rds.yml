@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: RDS for  MySQL and ec2 Create
+
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------#
+Parameters:
+  Env:
+    Type: String
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+
+  SystemName:
+    Type: String
+
+  DBInstanceName:
+    Type: String
+    Default: "rds"
+  MySQLMajorVersion:
+    Type: String
+    Default: "5.7"
+    AllowedValues: ["5.5", "5.6", "5.7"]
+  MySQLMinorVersion:
+    Type: String
+    Default: "22"
+  DBInstanceClass:
+    Type: String
+    Default: "db.t3.micro"
+  DBInstanceStorageSize:
+    Type: String
+    Default: "30"
+  DBInstanceStorageType:
+    Type: String
+    Default: "gp2"
+  DBName:
+    Type: String
+    Default: "db"
+  DBMasterUserName:
+    Type: String
+    Default: "dbuser"
+    NoEcho: true
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: "must begin with a letter and contain only alphanumeric characters."
+  DBPassword:
+    Default: "dbpassword"
+    NoEcho: true
+    Type: String
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: "must contain only alphanumeric characters."
+  MultiAZ:
+    Default: "false"
+    Type: String
+    AllowedValues: ["true", "false"]
+  BastionName:
+    Type: String
+    Default: "bastion"
+  BastionKeyName:
+    Type: String
+    Default: ""
+Resources:
+  # ------------------------------------------------------------#
+  #  Bastions EC2
+  # ------------------------------------------------------------#
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: false
+      ImageId: "ami-0c3fd0f5d33134a76"
+      InstanceType: t2.micro
+      KeyName: !Ref BastionKeyName
+      Monitoring: false
+      SecurityGroupIds:
+        - !Ref BastionSecurityGroup
+      SubnetId:
+        { "Fn::ImportValue": !Sub "${Env}-${SystemName}-public-subnet-a" }
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Env}-${SystemName}-${DBInstanceName}-bastion"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum -y update
+          yum -y install mysql --assumeyes
+
+  BastionElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref Bastion
+      Domain: vpc
+  # ------------------------------------------------------------#
+  #  DBInstance MySQL
+  # ------------------------------------------------------------#
+  DBInstance:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBInstanceIdentifier: !Sub "${Env}-${SystemName}-${DBInstanceName}"
+      Engine: MySQL
+      EngineVersion: !Sub "${MySQLMajorVersion}.${MySQLMinorVersion}"
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBInstanceStorageSize
+      StorageType: !Ref DBInstanceStorageType
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBMasterUserName
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: !Ref MultiAZ
+      PreferredBackupWindow: "18:00-18:30"
+      PreferredMaintenanceWindow: "sat:19:00-sat:19:30"
+      AutoMinorVersionUpgrade: false
+      DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      CopyTagsToSnapshot: true
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: "Name"
+          Value: !Ref DBInstanceName
+    DeletionPolicy: "Delete"
+
+  # ------------------------------------------------------------#
+  #  DBParameterGroup
+  # ------------------------------------------------------------#
+  DBParameterGroup:
+    Type: "AWS::RDS::DBParameterGroup"
+    Properties:
+      Family: !Sub "MySQL${MySQLMajorVersion}"
+      Description: !Sub "${Env}-${SystemName}-${DBInstanceName}-parm"
+
+  # ------------------------------------------------------------#
+  #  SecurityGroup for RDS (MySQL)
+  # ------------------------------------------------------------#
+  RDSSecurityGroup:
+    DependsOn: BastionSecurityGroup
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: { "Fn::ImportValue": !Sub "${Env}-${SystemName}-vpc" }
+      GroupName: !Sub "${Env}-${SystemName}-${DBInstanceName}-sg"
+      GroupDescription: "-"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Env}-${SystemName}-${DBInstanceName}-sg"
+      # Rule
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref BastionSecurityGroup
+
+  # ------------------------------------------------------------#
+  #  SecurityGroup for EC2 (Bastion)
+  # ------------------------------------------------------------#
+  BastionSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: { "Fn::ImportValue": !Sub "${Env}-${SystemName}-vpc" }
+      GroupName: !Sub "${Env}-${SystemName}-${BastionName}-sg"
+      GroupDescription: "-"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${Env}-${SystemName}-${BastionName}-sg"
+      # Rule
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+  # ------------------------------------------------------------#
+  #  DBSubnetGroup
+  # ------------------------------------------------------------#
+  DBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupName: !Sub "${Env}-${SystemName}-${DBInstanceName}-subnet"
+      DBSubnetGroupDescription: "-"
+      SubnetIds:
+        - { "Fn::ImportValue": !Sub "${Env}-${SystemName}-private-subnet-a" }
+        - { "Fn::ImportValue": !Sub "${Env}-${SystemName}-private-subnet-c" }
+
+# ------------------------------------------------------------#
+# Output Parameters
+# ------------------------------------------------------------#
+Outputs:
+  #DBInstance
+  DBInstanceID:
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub "${Env}-${SystemName}-${DBInstanceName}-id"
+
+  DBInstanceEndpoint:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${Env}-${SystemName}-${DBInstanceName}-endpoint"
+
+  DBName:
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${Env}-${SystemName}-${DBInstanceName}-dbname"
