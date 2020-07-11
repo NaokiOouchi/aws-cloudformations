@@ -1,0 +1,60 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "デプロイ先のクロスアカウントから CodeCommit にアクセスするためのロールを作成する"
+
+Parameters:
+  Env:
+    Type: String
+    Default: Dev
+    Description: "Unique environment name for Codepipeline account: Stg,Prd,Dev,etc."
+
+  DeployAccountId:
+    Type: String
+    Description: "AccountID for Codepipeline account"
+
+  SourceAccountId:
+    Type: String
+    Default: ""
+    Description: "AccountID for CodeCommit account"
+
+Resources:
+  # Create an IAM role to access codecommit
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Env}AcctCodePipelineCodeCommitRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${DeployAccountId}:root
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${Env}AcctCodePipelineCodeCommitPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey*
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - codecommit:BatchGetRepositories
+                  - codecommit:Get*
+                  - codecommit:GitPull
+                  - codecommit:List*
+                  - codecommit:CancelUploadArchive
+                  - codecommit:UploadArchive
+                Resource:
+                  - "*"

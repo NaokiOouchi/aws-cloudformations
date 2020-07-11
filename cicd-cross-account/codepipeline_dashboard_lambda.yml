@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Create resources to automatic deploy lambda functions."
+
+Parameters:
+  LambdaStackName:
+    Type: String
+    Description: "Stack name for CFn to deploy lambda functions"
+
+  LambdaDeployParamFile:
+    Type: String
+    Default: env/stg.json
+    Description: "Parameters file for lambda deploy template file"
+
+  # CodeCommit にアクセスするためのロールを作成する時に入力される Env と同じ値にする
+  Env:
+    Type: String
+    Default: Dev
+    Description: "Unique environment name for Codepipeline account: Stg,Prd,Dev,etc. The value should be the same as the Env entered when creating the role to access CodeCommit."
+
+  DeployAccountId:
+    Type: String
+    Description: "AccountID for Codepipeline"
+
+  SourceAccountId:
+    Type: String
+    Description: "AccountID for CodeCommit"
+
+  RepositoryName:
+    Type: String
+    Description: "Repository name for pipeline source"
+
+  BranchName:
+    Type: String
+    Description: "Branch name for pipeline source"
+
+  BucketName:
+    Type: String
+    Description: "Bucket name for storing artifacts"
+
+  BuildspecName:
+    Type: String
+    Default: buildspec.yml
+    Description: "buildspec name for Codebuild"
+
+Resources:
+  #pipeline用のIAMロールを作成
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${BucketName}
+                  - !Sub arn:aws:s3:::${BucketName}/*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - cloudformation:DescribeStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Sub arn:aws:iam::${SourceAccountId}:role/${Env}AcctCodePipelineCodeCommitRole
+          PolicyName: !Sub CodePipeline-${LambdaStackName}-Policy
+      RoleName: !Sub CodePipeline-${LambdaStackName}-Role
+  #codebuild用のIAMロールを作成
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CodeBuild-${LambdaStackName}-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - "*"
+          PolicyName: !Sub CodeBuild-${LambdaStackName}-Policy
+  # CFnでLambdaをデプロイするロールを作成
+  PipelineDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CodePipeline-cfn-${LambdaStackName}-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - apigateway:*
+                  - codedeploy:*
+                  - lambda:*
+                  - cloudformation:CreateChangeSet
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PassRole
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - "*"
+          PolicyName: !Sub CodePipeline-cfn-${LambdaStackName}-Policy
+  #S3暗号化の為のKMSキーを作成
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: deploy
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${DeployAccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: "Allow access for Key Administrators"
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt CodeBuildRole.Arn
+                - !GetAtt PipelineRole.Arn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+            Resource: "*"
+          - Sid: "Allow use of the key"
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${SourceAccountId}:root
+                - !GetAtt CodeBuildRole.Arn
+                - !GetAtt PipelineRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: "Allow attachment of persistent resources"
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${SourceAccountId}:root
+                - !GetAtt CodeBuildRole.Arn
+                - !GetAtt PipelineRole.Arn
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: true
+  #アーティファクト用S3バケットを作成
+  SourceS3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${BucketName}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKey
+  SourceS3BacketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SourceS3
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: SSEAndSSLPolicy
+        Statement:
+          - Sid: CrossAccountS3Policy
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${SourceAccountId}:root
+            Action:
+              - s3:*
+            Resource: !Sub arn:aws:s3:::${BucketName}/*
+          - Sid: CodePipeline
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt PipelineRole.Arn
+            Action: s3:*
+            Resource: !Sub arn:aws:s3:::${BucketName}/*
+  #Codebuildプロジェクトを作成
+  Codebuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Description: !Sub Build ${LambdaStackName}
+      EncryptionKey: !GetAtt KmsKey.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        # https://docs.aws.amazon.com/ja_jp/codebuild/latest/userguide/build-env-ref-compute-types.html
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: "aws/codebuild/standard:4.0"
+      Name: !Sub ${Env}-${LambdaStackName}
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub ${BuildspecName}
+  #Codecommitからソースを読み込んでCodebuildに受け渡すCodePipelineを作成
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${Env}-${LambdaStackName}-Pipeline
+      ArtifactStore:
+        Type: S3
+        Location: !Sub ${BucketName}
+        EncryptionKey:
+          Id: !GetAtt KmsKey.Arn
+          Type: KMS
+      RoleArn: !GetAtt PipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Name: Source
+              Configuration:
+                BranchName: !Sub ${BranchName}
+                RepositoryName: !Sub ${RepositoryName}
+              OutputArtifacts:
+                - Name: SourceCode
+              RoleArn: !Sub arn:aws:iam::${SourceAccountId}:role/${Env}AcctCodePipelineCodeCommitRole
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Name: Build
+              Configuration:
+                ProjectName: !Ref Codebuild
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt PipelineDeployRole.Arn
+                StackName: !Ref LambdaStackName
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                TemplatePath: BuildArtifact::outputtemplate.yml
+                TemplateConfiguration: !Sub BuildArtifact::${LambdaDeployParamFile}
+              RunOrder: "1"
